@@ -53,27 +53,30 @@ class MultiAttentionHeads(nn.Module):
         attention_maps = attentions
         return self.project(output), attention_maps
 class FeedForwardLayer(nn.Module):
-    def __init__(self, n_input, n_hidden, n_output):
+    def __init__(self, n_input, n_hidden, n_output, dropout_rate=0.1):
         super(FeedForwardLayer, self).__init__()
         self.first = nn.Linear(n_input, n_hidden)
         self.second = nn.ReLU()
         self.third = nn.Linear(n_hidden, n_output)
-        # Writeup did not mention that we should dropout for the forward layer so we do not
+        self.dropout = nn.Dropout(dropout_rate)
     def forward(self, x):
-        return self.third(self.second(self.first(x)))
+        x = self.first(x)
+        x = self.second(x)
+        x = self.dropout(x)
+        return self.third(x)
 class EncodingBlock(nn.Module):
-    def __init__(self, num_embd, n_head, block_size, sparsity_pattern):
+    def __init__(self, num_embd, n_head, block_size, sparsity_pattern, norm_layer=nn.LayerNorm):
         super().__init__()
         headSize = num_embd // n_head
         self.Attention = MultiAttentionHeads(n_head, headSize, num_embd, False, block_size, sparsity_pattern)
         #the forward/sequential MLP layer
         self.sequential_forward = FeedForwardLayer(num_embd, num_embd*4, num_embd)
-        self.ln1 = nn.LayerNorm(num_embd)
-        self.ln2 = nn.LayerNorm(num_embd)
+        self.ln1 = norm_layer(num_embd)
+        self.ln2 = norm_layer(num_embd)
     def forward(self, x):
         attn_output, attn_map = self.Attention(x)
-        x  = self.ln1(attn_output)+x 
-        x = self.ln2(self.sequential_forward(x))+x 
+        x  = self.ln1(attn_output)+x
+        x = self.ln2(self.sequential_forward(x))+x
         return x, attn_map
 class EncodingTransformer(nn.Module):
     def __init__(self, vocab_size, num_embds, block_size, num_layers, num_heads, forward_inpt, forward_hid, forward_out, sparsity_pattern):
@@ -149,27 +152,27 @@ class SparseSelfAttentionHead(nn.Module):
         self.shouldMask = shouldMask
         self.sparsity_pattern = sparsity_pattern
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
-    
+
     def forward(self, x):
         B, T, C = x.size()
         Q = self.query(x)
         K = self.key(x)
         V = self.value(x)
-        
+
         # Sparse attention weights
         weights = Q @ K.transpose(-2, -1) * (self.headSize**-0.5)
-        
+
         if self.shouldMask:
             weights = weights.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
-        
+
         # Apply sparsity pattern
         sparsity_mask = self.get_sparsity_mask(T)
         weights = weights.masked_fill(sparsity_mask == 0, float('-inf'))
-        
+
         weights = torch.softmax(weights, dim=-1)
         output = weights @ V
         return output, weights
-    
+
     def get_sparsity_mask(self, T):
         mask = torch.ones(T, T, device=self.tril.device)
         # Apply the sparsity pattern (here is an example of block sparsity)
